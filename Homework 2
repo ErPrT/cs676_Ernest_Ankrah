@@ -1,1 +1,14 @@
+Exercise 2 Logistic regression (02_logreg.py)
 
+def sigmoid(z):
+    """
+    Compute the logistic sigmoid function with numerical stability clipping.
+    """
+    z_clipped = np.clip(z, -500, 500)
+    return 1.0 / (1.0 + np.exp(-z_clipped))
+
+# Gradient descent loop
+for _ in range(n_iter):
+    p_pred = sigmoid(X @ beta)
+    grad = (1 / len(y)) * (X.T @ (p_pred - y))
+    beta = beta - lr * grad
