@@ -1,0 +1,24 @@
+Exercise 3 K-Fold Cross Validation (03_cv.py)
+
+def make_folds(n_samples, k, shuffle=True, seed=None):
+    """
+    Partition sample indices into k roughly equal disjoint splits.
+    """
+    indices = np.arange(n_samples)
+    if shuffle:
+        rng = np.random.default_rng(seed)
+        rng.shuffle(indices)
+    return np.array_split(indices, k)
+
+# K-fold evaluation loop
+scores = []
+for i in range(k):
+    test_idx = folds[i]
+    train_idx = np.concatenate([folds[j] for j in range(k) if j != i])
+    
+    X_train, y_train = X[train_idx], y[train_idx]
+    X_test, y_test = X[test_idx], y[test_idx]
+    
+    beta = fit(X_train, y_train)
+    y_pred = X_test @ beta
+    scores.append(metric(y_test, y_pred))
