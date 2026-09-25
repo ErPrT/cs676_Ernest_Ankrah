@@ -1,0 +1,222 @@
+"""
+credibility.py - Source Credibility Scorer
+
+Course: CS 676 - Algorithms for Data Science
+Deliverable: Project 1
+
+Description:
+    Computes a continuous credibility score in [0.0, 1.0] and generates an
+    informative justification for any given URL. Blends structural rule-based
+    path/domain heuristics with an LLM-evaluation layer when available.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import urllib.parse
+from typing import Dict, Any, Tuple
+
+# Baseline configuration and weights
+RULE_WEIGHT: float = 0.55
+LLM_WEIGHT: float = 0.45
+DEFAULT_SCORE: float = 0.50
+
+# Curated High-Authority and Institutional TLD heuristics
+RECOGNIZED_AUTHORITY_TLDS = {
+    ".edu": 0.88,
+    ".gov": 0.92,
+    ".mil": 0.90,
+    ".int": 0.85,
+    ".ac.uk": 0.88,
+    ".gov.uk": 0.92,
+}
+
+# Known academic, peer-reviewed, and reputable preprint host patterns
+ACADEMIC_INDICATORS = [
+    r"jamanetwork\.com",
+    r"nature\.com",
+    r"sciencedirect\.com",
+    r"ncbi\.nlm\.nih\.gov",
+    r"nejm\.org",
+    r"thelancet\.com",
+    r"cell\.com",
+    r"arxiv\.org",
+    r"biorxiv\.org",
+    r"medrxiv\.org",
+    r"ieee\.org",
+    r"springer\.com",
+    r"wiley\.com",
+    r"tandfonline\.com",
+]
+
+# Path markers indicating promotional, commercial, or opinion content
+COMMERCIAL_PATH_PATTERNS = [
+    r"/affiliate",
+    r"/sponsor",
+    r"/promo",
+    r"/shop",
+    r"/store",
+    r"/cart",
+    r"/product",
+    r"/opinion",
+    r"/sponsored-content",
+]
+
+# Path markers indicating peer-reviewed research, legal filings, or data
+EVIDENTIARY_PATH_PATTERNS = [
+    r"/doi/",
+    r"/10\.\d{4,9}/",
+    r"/articles?/",
+    r"/pmc/articles/",
+    r"/research/",
+    r"/peer-review/",
+]
+
+
+def extract_url_features(url: str) -> Dict[str, Any]:
+    """
+    Parses a URL string into structured architectural components.
+    Safely captures schemes, hostnames, top-level domains, and path tokens.
+    Guarantees non-throwing behavior on malformed inputs.
+    """
+    cleaned = (url or "").strip()
+    if not cleaned:
+        return {"valid": False, "reason": "Empty URL provided"}
+
+    # Add default scheme if omitted for resilient parsing
+    if not re.match(r"^[a-zA-Z]+://", cleaned):
+        cleaned = "https://" + cleaned
+
+    try:
+        parsed = urllib.parse.urlparse(cleaned)
+    except Exception as exc:
+        return {"valid": False, "reason": f"Parsing exception: {exc}"}
+
+    hostname = (parsed.hostname or "").lower()
+    path = parsed.path.lower()
+    scheme = parsed.scheme.lower()
+
+    if not hostname:
+        return {"valid": False, "reason": "No valid hostname found"}
+
+    return {
+        "valid": True,
+        "raw_url": cleaned,
+        "scheme": scheme,
+        "hostname": hostname,
+        "path": path,
+    }
+
+
+def evaluate_rules(features: Dict[str, Any]) -> Tuple[float, list[str]]:
+    """
+    Applies deterministic structural heuristics over domain and path.
+    Generalizes to held-out academic repositories and blogs using
+    pattern matches rather than exhaustive static tables.
+    """
+    if not features.get("valid"):
+        return (0.10, [features.get("reason", "Malformed or unparseable URL.")])
+
+    score = DEFAULT_SCORE
+    reasons = []
+    hostname = features["hostname"]
+    path = features["path"]
+
+    # 1. Transport protocol integrity
+    if features["scheme"] == "https":
+        reasons.append("Served over encrypted HTTPS")
+    else:
+        score -= 0.15
+        reasons.append("Unsecured HTTP connection")
+
+    # 2. Institutional / Top-Level Domain heuristic
+    tld_matched = False
+    for tld, base_tld_score in RECOGNIZED_AUTHORITY_TLDS.items():
+        if hostname.endswith(tld):
+            score = max(score, base_tld_score)
+            reasons.append(f"High-trust institutional domain ({tld})")
+            tld_matched = True
+            break
+
+    # 3. Academic publication & peer-reviewed registry patterns
+    is_academic = False
+    for pattern in ACADEMIC_INDICATORS:
+        if re.search(pattern, hostname):
+            is_academic = True
+            break
+
+    if is_academic:
+        score = max(score, 0.85)
+        reasons.append("Recognized peer-reviewed journal or scientific repository")
+
+    # 4. Path content signatures
+    for pattern in EVIDENTIARY_PATH_PATTERNS:
+        if re.search(pattern, path):
+            score = min(1.0, score + 0.08)
+            reasons.append("Path matches academic DOI or structured publication format")
+            break
+
+    for pattern in COMMERCIAL_PATH_PATTERNS:
+        if re.search(pattern, path):
+            score = max(0.15, score - 0.25)
+            reasons.append("Path contains commercial, promotional, or sponsored markers")
+            break
+
+    # 5. Generic blog / user-generated host penalization
+    if any(k in hostname for k in ["blogspot.com", "wordpress.com", "medium.com", "tumblr.com"]):
+        score = min(score, 0.35)
+        reasons.append("User-generated hosting platform with unvetted publishing")
+
+    # Enforce contract bounds
+    score = max(0.0, min(1.0, score))
+    return score, reasons
+
+
+def score_url(url: str) -> Dict[str, Any]:
+    """
+    Main evaluation entry point.
+    Computes a normalized score in [0.0, 1.0] and returns an actionable explanation.
+    Maintains downstream contract compatibility with evaluate.py and test_credibility.py.
+    """
+    features = extract_url_features(url)
+    rule_score, rule_reasons = evaluate_rules(features)
+
+    # Check for optional Anthropic LLM layer
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    final_score = rule_score
+    explanation_parts = rule_reasons
+
+    if api_key:
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+            prompt = (
+                f"Assess the journalistic/scientific credibility of the following URL: {url}\n"
+                "Return your answer strictly in this format:\n"
+                "SCORE: <float between 0.00 and 1.00>\n"
+                "REASON: <concise, single-sentence justification>"
+            )
+            response = client.messages.create(
+                model=os.environ.get("JUDGE_MODEL", "claude-haiku-4-5"),
+                max_tokens=100,
+                temperature=0.0,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.content[0].text
+            score_match = re.search(r"SCORE:\s*([0-1](?:\.\d+)?)", text)
+            reason_match = re.search(r"REASON:\s*(.+)", text)
+
+            if score_match:
+                llm_score = float(score_match.group(1))
+                final_score = (RULE_WEIGHT * rule_score) + (LLM_WEIGHT * llm_score)
+                if reason_match:
+                    explanation_parts.append(f"Model Assessment: {reason_match.group(1).strip()}")
+        except Exception:
+            # Resilient fallback: preserve deterministic rule layer output
+            pass
+
+    return {
+        "score": round(float(final_score), 3),
+        "explanation": "; ".join(explanation_parts) if explanation_parts else "Evaluated via baseline rules."
+    }
